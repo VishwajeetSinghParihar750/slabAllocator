@@ -10,10 +10,10 @@ struct DataObject
 {
     int id;
     double values[16];
-    char description[64];
+    char description[60];
 
     DataObject() : id(0)
-    {
+    {   
         strcpy(description, "default");
     }
 };

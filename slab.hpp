@@ -6,12 +6,6 @@ class cache_t;
 struct free_list
 {
     unsigned int *arr; // first element
-
-    free_list(unsigned int *arr_, size_t n) : arr(arr_)
-    {
-        for (unsigned int i = 0; i < n; i++)
-            arr[i] = i + 1;
-    }
 };
 
 class slab_t

@@ -8,6 +8,12 @@
 size_t PAGE_COUNT = 1;
 const size_t PAGE_SIZE = 4096; // BYTES
 
+template <typename T>
+constexpr T align_up(T n, size_t align = alignof(std::max_align_t))
+{
+    return (n + align - 1) & ~(align - 1);
+}
+
 class cache_t // for now jsut keep one page per slab
 {
     using ctor = void (*)(void *);
@@ -131,9 +137,11 @@ class cache_t // for now jsut keep one page per slab
 
         slab_t *slab_obj = new (mem) slab_t{};
 
-        char *base = reinterpret_cast<char *>(mem);
-        unsigned int *freelist_arr = reinterpret_cast<unsigned int *>(base + sizeof(slab_t));
-        char *obj_mem = base + sizeof(slab_t) + sizeof(unsigned int) * obj_cnt;
+        char *base = (char *)(mem);
+
+        unsigned int *freelist_arr = (unsigned int *)(align_up((uintptr_t)(base + sizeof(slab_t))));
+
+        char *obj_mem = (char *)align_up((uintptr_t)freelist_arr + sizeof(unsigned int) * obj_cnt);
 
         slab_obj->mem = obj_mem;
         slab_obj->free = 0;
@@ -156,13 +164,25 @@ class cache_t // for now jsut keep one page per slab
     }
 
 public:
-    cache_t(const char *name_, size_t obj_size_, ctor ctr = nullptr, dtor dtr = nullptr) : name(name_), obj_size(obj_size_),
+    cache_t(const char *name_, size_t obj_size_, ctor ctr = nullptr, dtor dtr = nullptr) : name(name_), obj_size(align_up(obj_size_)),
                                                                                            slabs_full(nullptr), slabs_partial(nullptr), slabs_empty(nullptr),
                                                                                            cons(ctr), dest(dtr)
     {
-        size_t slab_metadata = sizeof(slab_t);
+        obj_cnt = (PAGE_SIZE * PAGE_COUNT - sizeof(slab_t)) / (obj_size + sizeof(unsigned int));
 
-        obj_cnt = (PAGE_COUNT * PAGE_SIZE - slab_metadata) / (obj_size + sizeof(unsigned int)); // size for free list array too
+        while (true)
+        {
+            uintptr_t freelist_size = obj_cnt * sizeof(unsigned int);
+            uintptr_t obj_start = align_up(align_up(sizeof(slab_t)) + freelist_size);
+            uintptr_t total_used = obj_start + obj_cnt * obj_size;
+
+            if (total_used <= PAGE_SIZE * PAGE_COUNT)
+                break;
+
+            obj_cnt--;
+        }
+
+        assert(obj_cnt > 0);
     }
 
     void *cache_alloc()

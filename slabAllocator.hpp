@@ -5,13 +5,12 @@
 #include "assert.h"
 #include "cache.hpp"
 
-//
+
+class slabAllocator
+{
 using ctor = void (*)(void *);
 using dtor = void (*)(void *);
 
-//
-class slabAllocator
-{
     std::unordered_map<const char *, cache_t> caches;
 
 public:
