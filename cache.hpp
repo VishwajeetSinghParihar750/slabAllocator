@@ -1,5 +1,6 @@
 #pragma once
 #include <stdlib.h>
+#include <unistd.h>
 #include <stdint.h>
 #include <sys/mman.h>
 #include <stdexcept>
@@ -9,12 +10,12 @@ namespace
 {
     constexpr size_t PAGE_COUNT = 1;
     constexpr size_t PAGE_SIZE = 4096; // BYTES
-}
 
-template <typename T>
-constexpr T align_up(T n, size_t align = alignof(std::max_align_t))
-{
-    return (n + align - 1) & ~(align - 1);
+    template <typename T>
+    constexpr T align_up(T n, size_t align = alignof(std::max_align_t))
+    {
+        return (n + align - 1) & ~(align - 1);
+    }
 }
 
 class cache_t // for now jsut keep one page per slab
@@ -29,6 +30,9 @@ class cache_t // for now jsut keep one page per slab
 
     ctor cons;
     dtor dest;
+
+    //
+    unsigned int color, color_offset, color_next; // for cache coloring
 
     // slab movement helpers
     void move_slab_partial_to_full(slab_t *slab)
@@ -142,6 +146,16 @@ class cache_t // for now jsut keep one page per slab
         return get_obj_at_index((char *)p->mem, nextfree);
     }
 
+    void *add_cache_coloring(void *obj_start)
+    {
+        if (color == 1)
+            return obj_start;
+
+        uintptr_t new_obj_start = (uintptr_t)obj_start + color_next * color_offset;
+        color_next = (color_next + 1) % color;
+        return (void *)new_obj_start;
+    }
+
     void allocate_free_slab()
     {
         //
@@ -158,11 +172,11 @@ class cache_t // for now jsut keep one page per slab
 
         void *obj_mem = get_obj_offset(slab_obj);
 
-        slab_obj->mem = obj_mem;
+        slab_obj->mem = add_cache_coloring(obj_mem);
 
         if (dest == nullptr && cons != nullptr) // if dest != nullptr, cons/dest are called when giving/getting objects
             for (size_t i = 0; i < obj_cnt; i++)
-                cons(get_obj_at_index((char *)obj_mem, i));
+                cons(get_obj_at_index((char *)slab_obj->mem, i));
 
         // put slab in empty list
         if (slabs_empty == nullptr)
@@ -176,7 +190,12 @@ public:
                                                                                            slabs_full(nullptr), slabs_partial(nullptr), slabs_empty(nullptr),
                                                                                            cons(ctr), dest(dtr)
     {
+
+        assert(obj_size > 0);
+
         obj_cnt = (PAGE_SIZE * PAGE_COUNT - sizeof(slab_t)) / (obj_size + sizeof(unsigned int));
+
+        size_t size_left = 0;
 
         while (true)
         {
@@ -185,30 +204,40 @@ public:
             uintptr_t total_used = obj_start + obj_cnt * obj_size;
 
             if (total_used <= PAGE_SIZE * PAGE_COUNT)
+            {
+                size_left = PAGE_SIZE * PAGE_COUNT - total_used;
                 break;
-
+            }
             obj_cnt--;
         }
 
         assert(obj_cnt > 0);
+
+        // set up coloring
+
+        size_t cache_line_size = 64;
+        if (auto p = sysconf(_SC_LEVEL1_DCACHE_LINESIZE); p > 0)
+            cache_line_size = p;
+
+        color = (size_left / cache_line_size) + 1;
+        color_next = 0;
+        color_offset = cache_line_size;
     }
 
     void *cache_alloc()
     {
-        if (auto toret = get_partial_obj(); toret != nullptr)
-            return toret;
+        void *toret = nullptr;
+        if (toret = get_partial_obj(); toret != nullptr)
+            ;
+        else if (toret = get_free_obj(); toret != nullptr)
+            ;
+        else
+            allocate_free_slab(), toret = get_free_obj();
 
-        if (auto toret = get_free_obj(); toret != nullptr)
-            return toret;
+        if (dest != nullptr && cons != nullptr) // if no dest if would have been constructed at slab allocaiton itself
+            cons(toret);
 
-        allocate_free_slab();
-
-        auto p = get_free_obj();
-
-        if (dest && cons) // if no dest if would have been constructed at slab allocaiton itself
-            cons(p);
-
-        return p;
+        return toret;
     }
 
     void cache_free(void *obj)
@@ -246,11 +275,13 @@ public:
     ~cache_t()
     {
         for (auto cur_list : {slabs_full, slabs_partial, slabs_empty})
+        {
             while (cur_list)
             {
                 void *p = cur_list;
                 cur_list = cur_list->next;
                 munmap(p, PAGE_COUNT * PAGE_SIZE);
             }
+        }
     }
 };
