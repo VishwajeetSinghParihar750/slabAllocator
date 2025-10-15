@@ -42,7 +42,7 @@ The allocator follows a Linux-style slab allocation model:
 ### Benchmark Methodology
 All benchmarks were run on:
 - CPU: Intel i5 9th gen 8 core
-- Compiler: gcc version 13.3.0 (Ubuntu 13.3.0-6ubuntu2~24.04) , `-O3` optimization
+- Compiler: gcc version 13.3.0, `-O3` optimization
 - OS: Ubuntu 22.04 (WSL2)
 - Credit: Benchmarks were created with the help of deepseek
 
