@@ -5,7 +5,14 @@ class cache_t;
 
 struct free_list
 {
-    unsigned int *arr; // first element
+
+    free_list(unsigned int *arr, size_t n)
+    {
+        for (unsigned int i = 0; i < n; i++)
+        {
+            arr[i] = i + 1; // last element may have BUFCTL_END
+        }
+    }
 };
 
 class slab_t
@@ -20,7 +27,7 @@ class slab_t
     friend class cache_t;
 
 public:
-    slab_t() : mem(nullptr), active_obj_cnt(0), free(0) {}
+    slab_t() : mem(nullptr), active_obj_cnt(0), free(0), prev(nullptr), next(nullptr) {}
 
     slab_t *connect_before(slab_t *node) // return cur node
     {

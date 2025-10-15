@@ -5,8 +5,11 @@
 #include <stdexcept>
 #include "slab.hpp"
 
-size_t PAGE_COUNT = 1;
-const size_t PAGE_SIZE = 4096; // BYTES
+namespace
+{
+    constexpr size_t PAGE_COUNT = 1;
+    constexpr size_t PAGE_SIZE = 4096; // BYTES
+}
 
 template <typename T>
 constexpr T align_up(T n, size_t align = alignof(std::max_align_t))
@@ -27,7 +30,7 @@ class cache_t // for now jsut keep one page per slab
     ctor cons;
     dtor dest;
 
-    //
+    // slab movement helpers
     void move_slab_partial_to_full(slab_t *slab)
     {
         assert(slab->active_obj_cnt == obj_cnt);
@@ -90,14 +93,27 @@ class cache_t // for now jsut keep one page per slab
             move_slab_partial_to_empty(slab);
     }
 
+    // get helpers
+    unsigned int *get_freelist_offset(const void *slab) const
+    {
+        return (unsigned int *)align_up((uintptr_t)slab + sizeof(slab_t));
+    }
+    void *get_obj_offset(const void *slab)
+    {
+        auto p = get_freelist_offset(slab);
+        return (void *)align_up((uintptr_t)p + sizeof(unsigned int) * obj_cnt);
+    }
+    void *get_obj_at_index(char *obj_start, size_t index) const
+    {
+        return obj_start + index * obj_size;
+    }
     unsigned int get_and_modify_next_free(slab_t *cur_slab)
     {
         unsigned int nextfree = cur_slab->free;
-        unsigned int *freelist_offset = reinterpret_cast<unsigned int *>(reinterpret_cast<char *>(cur_slab) + sizeof(slab_t));
+        unsigned int *freelist_offset = get_freelist_offset(cur_slab);
         cur_slab->free = *(freelist_offset + nextfree);
         return nextfree;
     }
-
     void *get_partial_obj()
     {
         if (slabs_partial == nullptr)
@@ -110,7 +126,7 @@ class cache_t // for now jsut keep one page per slab
         if (++slabs_partial->active_obj_cnt == obj_cnt)
             move_slab_partial_to_full(slabs_partial);
 
-        return (char *)p->mem + obj_size * nextfree;
+        return get_obj_at_index((char *)p->mem, nextfree);
     }
     void *get_free_obj()
     {
@@ -123,7 +139,7 @@ class cache_t // for now jsut keep one page per slab
         ++slabs_empty->active_obj_cnt;
         move_slab_empty_to_partial(slabs_empty);
 
-        return (char *)p->mem + obj_size * nextfree;
+        return get_obj_at_index((char *)p->mem, nextfree);
     }
 
     void allocate_free_slab()
@@ -132,29 +148,21 @@ class cache_t // for now jsut keep one page per slab
         void *mem = mmap(nullptr, PAGE_COUNT * PAGE_SIZE,
                          PROT_READ | PROT_WRITE,
                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if (mem == MAP_FAILED)
-            throw std::runtime_error("mmap failed");
+
+        assert(mem != MAP_FAILED);
 
         slab_t *slab_obj = new (mem) slab_t{};
 
-        char *base = (char *)(mem);
+        auto p = get_freelist_offset(slab_obj);
+        new (p) free_list(p, obj_cnt); // initialisign free list
 
-        unsigned int *freelist_arr = (unsigned int *)(align_up((uintptr_t)(base + sizeof(slab_t))));
-
-        char *obj_mem = (char *)align_up((uintptr_t)freelist_arr + sizeof(unsigned int) * obj_cnt);
+        void *obj_mem = get_obj_offset(slab_obj);
 
         slab_obj->mem = obj_mem;
-        slab_obj->free = 0;
-        slab_obj->active_obj_cnt = 0;
-
-        for (unsigned int i = 0; i < obj_cnt; i++)
-        {
-            freelist_arr[i] = i + 1; // last element may have BUFCTL_END
-        }
 
         if (dest == nullptr && cons != nullptr) // if dest != nullptr, cons/dest are called when giving/getting objects
             for (size_t i = 0; i < obj_cnt; i++)
-                cons(obj_mem + i * obj_size);
+                cons(get_obj_at_index((char *)obj_mem, i));
 
         // put slab in empty list
         if (slabs_empty == nullptr)
@@ -187,19 +195,17 @@ public:
 
     void *cache_alloc()
     {
-        void *toret = get_partial_obj();
-        if (toret != nullptr)
+        if (auto toret = get_partial_obj(); toret != nullptr)
             return toret;
 
-        toret = get_free_obj();
-        if (toret != nullptr)
+        if (auto toret = get_free_obj(); toret != nullptr)
             return toret;
 
         allocate_free_slab();
 
         auto p = get_free_obj();
 
-        if (dest && cons)
+        if (dest && cons) // if no dest if would have been constructed at slab allocaiton itself
             cons(p);
 
         return p;
@@ -211,16 +217,14 @@ public:
             dest(obj);
 
         // gettign addr
-        uintptr_t obj_add = reinterpret_cast<uintptr_t>(obj);
-        slab_t *slab = reinterpret_cast<slab_t *>(obj_add & ~(PAGE_SIZE * PAGE_COUNT - 1)); // 🚨⚠️ this works for (apge * pagecount) alinged memory only [so rn only 1 page can come coz mmap give one page algined ]
+        uintptr_t obj_add = (uintptr_t)obj;
+        slab_t *slab = (slab_t *)(obj_add & ~(PAGE_SIZE * PAGE_COUNT - 1)); // 🚨⚠️ this works for (apge * pagecount) alinged memory only [so rn only 1 page can come coz mmap give one page algined ]
 
         // resetting free list
-        unsigned int obj_ind = (obj_add - reinterpret_cast<uintptr_t>(slab->mem)) / obj_size;
+        unsigned int obj_ind = (obj_add - (uintptr_t)slab->mem) / obj_size;
         unsigned int next_free = slab->free;
 
-        unsigned int *freelist_offset = reinterpret_cast<unsigned int *>(
-            reinterpret_cast<char *>(slab) + sizeof(slab_t));
-
+        unsigned int *freelist_offset = get_freelist_offset(slab);
         freelist_offset[obj_ind] = next_free;
         slab->free = obj_ind;
 
