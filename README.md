@@ -51,4 +51,6 @@ All benchmarks were run on:
 - Large object support with multi-page slabs
 - Integration tests with real workloads
 - Performance comparison with more allocators
-
+  
+### Build and Test
+ - g++ -std=c++20 -O3 main.cpp -o slab_allocator && ./slab_allocator
