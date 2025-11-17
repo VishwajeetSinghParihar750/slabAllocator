@@ -12,7 +12,7 @@ namespace
     constexpr size_t PAGE_SIZE = 4096; // BYTES
 
     template <typename T>
-    constexpr T align_up(T n, size_t align = alignof(std::max_align_t))
+    constexpr T align_up(T n, size_t align = alignof(std::max_align_t)) noexcept
     {
         return (n + align - 1) & ~(align - 1);
     }
@@ -98,20 +98,20 @@ class cache_t // for now jsut keep one page per slab
     }
 
     // get helpers
-    unsigned int *get_freelist_offset(const void *slab) const
+    unsigned int *get_freelist_offset(const void *slab) const noexcept
     {
         return (unsigned int *)align_up((uintptr_t)slab + sizeof(slab_t));
     }
-    void *get_obj_offset(const void *slab)
+    void *get_obj_offset(const void *slab) const noexcept
     {
         auto p = get_freelist_offset(slab);
         return (void *)align_up((uintptr_t)p + sizeof(unsigned int) * obj_cnt);
     }
-    void *get_obj_at_index(char *obj_start, size_t index) const
+    void *get_obj_at_index(char *obj_start, size_t index) const noexcept
     {
         return obj_start + index * obj_size;
     }
-    unsigned int get_and_modify_next_free(slab_t *cur_slab)
+    unsigned int get_and_modify_next_free(slab_t *cur_slab) const
     {
         unsigned int nextfree = cur_slab->free;
         unsigned int *freelist_offset = get_freelist_offset(cur_slab);
@@ -146,9 +146,9 @@ class cache_t // for now jsut keep one page per slab
         return get_obj_at_index((char *)p->mem, nextfree);
     }
 
-    void *add_cache_coloring(void *obj_start)
+    void *add_cache_coloring(void *obj_start)  noexcept
     {
-        if (color == 1)
+        if (color < 2)
             return obj_start;
 
         uintptr_t new_obj_start = (uintptr_t)obj_start + color_next * color_offset;
