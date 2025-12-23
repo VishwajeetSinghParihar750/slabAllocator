@@ -1,4 +1,4 @@
-# ⚡ High-Performance C++ Slab Allocator (HFT-Grade)
+# ⚡ High-Performance C++ Slab Allocator 
 
 A production-ready, cache-friendly **Slab Allocator** designed for high-frequency trading (HFT), game networking (RUDP), and real-time systems. It achieves **~50 Million allocations/sec** on a single core and outperforms `malloc` by **over 5x** in complex, mixed workloads.
 
