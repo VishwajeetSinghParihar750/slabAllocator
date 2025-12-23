@@ -50,12 +50,6 @@ public:
         for (int i = 1; i <= 32; ++i)
         {
             uint16_t seq = baseline - i; // Implicit uint16_t wrap-around handles the math
-
-            if (exists(seq))
-            {
-                // Set the i-th bit to 1 (1-based index mapped to 0-31)
-                bitfield |= (1 << (i - 1));
-            }
         }
         return bitfield;
     }

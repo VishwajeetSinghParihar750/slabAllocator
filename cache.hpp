@@ -5,6 +5,7 @@
 #include <sys/mman.h>
 #include <stdexcept>
 #include <vector>
+#include <mutex>
 
 #include "slab.hpp"
 
@@ -14,7 +15,7 @@ namespace
     static constexpr uint32_t MIN_OBJECTS_PER_SLAB = 8;
     static constexpr uint32_t MIN_OBJECT_SIZE = 16;
 
-    static constexpr uint32_t DEFAULT_PAGE_ALLOCATION_COUNT = 64;
+    static constexpr uint32_t DEFAULT_PAGE_ALLOCATION_COUNT = 8;
     static const uint32_t CACHE_LINE_SIZE = sysconf(_SC_LEVEL1_DCACHE_LINESIZE) > 0 ? sysconf(_SC_LEVEL1_DCACHE_LINESIZE) : 64;
 
     template <typename T>
@@ -24,6 +25,7 @@ namespace
     }
 }
 
+// make this a singleton to enforce thread safety method we are using
 class cache_t // for now jsut keep one page per slab
 {
     using ctor = void (*)(void *);
@@ -116,9 +118,19 @@ class cache_t // for now jsut keep one page per slab
 
         mem = reinterpret_cast<void *>(mem_location);
 
-        for (int i = 0; i < DEFAULT_PAGE_ALLOCATION_COUNT; i++)
+        for (int i = 0; i < DEFAULT_PAGE_ALLOCATION_COUNT - (!got_aligned); i++)
             initiliaze_slab((uint8_t *)mem + PAGE_SIZE * i, got_aligned, i == 0);
     }
+
+    struct magazine
+    {
+        void *slots[256]; // Fixed max capacity
+        int top = -1;
+        int current_refill_size = 8; // Start small, double on miss
+    };
+
+    std::mutex mtx;
+    static inline thread_local std::unordered_map<cache_t *, magazine> tl_mags;
 
 public:
     cache_t(uint32_t obj_size_, ctor ctr = nullptr, dtor dtr = nullptr) : obj_size(obj_size_),
@@ -161,8 +173,47 @@ public:
         color_offset = CACHE_LINE_SIZE;
     }
 
+    void *thread_safe_alloc()
+    {
+        magazine &tl_mag = tl_mags[this];
+        if (tl_mag.top >= 0)
+            return tl_mag.slots[tl_mag.top--];
+
+        // Refill logic
+        std::lock_guard lock(mtx);
+        cache_alloc_batch(tl_mag.slots, tl_mag.current_refill_size);
+
+        int grabbed = tl_mag.current_refill_size;
+
+        if (tl_mag.current_refill_size < 256)
+            tl_mag.current_refill_size *= 2;
+
+        tl_mag.top = grabbed - 2;
+        return tl_mag.slots[grabbed - 1];
+    }
+    void thread_safe_free(void *obj)
+    {
+        magazine &tl_mag = tl_mags[this];
+
+        if (tl_mag.top < 255)
+        {
+            tl_mag.slots[++tl_mag.top] = obj;
+            return;
+        }
+
+        std::lock_guard lock(mtx);
+
+        int to_drain = 128;
+
+        cache_free_batch(&tl_mag.slots[tl_mag.top - to_drain + 1], to_drain);
+
+        tl_mag.top -= to_drain;
+        tl_mag.slots[++tl_mag.top] = obj;
+    }
+
     void *cache_alloc()
     {
+
         slab_t *slab = list_partial.next;
 
         if (__builtin_expect(slab == &list_partial, 0))
@@ -189,9 +240,52 @@ public:
 
         // __builtin_prefetch(obj, 1, 3);
 
-        if (cons)
+        if (cons && dest)
             cons(obj);
         return obj;
+    }
+
+    void cache_alloc_batch(void **dest, uint32_t count)
+    {
+        uint32_t allocated = 0;
+
+        while (allocated < count)
+        {
+            slab_t *slab = list_partial.next;
+
+            if (slab == &list_partial)
+            {
+                slab = list_empty.next;
+                if (slab == &list_empty)
+                {
+                    allocate_free_slab();
+                    slab = list_empty.next;
+                }
+                move_to_partial(slab);
+            }
+
+            uint8_t *freelist = (uint8_t *)slab + sizeof(slab_t);
+
+            while (allocated < count && slab->active_obj_cnt < obj_cnt)
+            {
+                uint8_t current_idx = slab->free;
+
+                void *obj = (uint8_t *)slab->mem + (current_idx * obj_size);
+
+                slab->free = freelist[current_idx];
+                slab->active_obj_cnt++;
+
+                if (cons && dest)
+                    cons(obj);
+
+                dest[allocated++] = obj;
+            }
+
+            if (slab->active_obj_cnt == obj_cnt)
+            {
+                move_to_full(slab);
+            }
+        }
     }
 
     void cache_free(void *obj)
@@ -207,6 +301,7 @@ public:
 
         // Push to freelist
         uint8_t *freelist = (uint8_t *)slab + sizeof(slab_t); // size of slab_t
+
         freelist[obj_ind] = slab->free;
         slab->free = obj_ind;
 
@@ -222,6 +317,32 @@ public:
         }
     }
 
+    void cache_free_batch(void **objs, uint32_t count)
+    {
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            void *obj = objs[i];
+
+            uintptr_t obj_addr = reinterpret_cast<uintptr_t>(obj);
+            slab_t *slab = reinterpret_cast<slab_t *>(obj_addr & ~(PAGE_SIZE - 1));
+
+            uint8_t obj_ind = (obj_addr - reinterpret_cast<uintptr_t>(slab->mem)) / obj_size;
+            uint8_t *freelist = reinterpret_cast<uint8_t *>(slab) + sizeof(slab_t);
+
+            freelist[obj_ind] = slab->free;
+            slab->free = obj_ind;
+            slab->active_obj_cnt--;
+
+            if (slab->active_obj_cnt == obj_cnt - 1)
+            {
+                move_to_partial(slab);
+            }
+            else if (slab->active_obj_cnt == 0)
+            {
+                move_to_empty(slab);
+            }
+        }
+    }
     //
 
     cache_t(const cache_t &) = delete;
