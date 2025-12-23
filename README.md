@@ -90,14 +90,16 @@ cd benchmark
 # 2. Compile and run
 g++ -std=c++20 -O3 benchmark3.cpp -o slab_allocator && ./slab_allocator
 
-### Credits
-* **Benchmarks created by:** Gemini
+```
+
+## Credits
+
+- **Benchmarks created by:** Gemini
 
 ## 🔮 Future Roadmap
 
-* [x] **Branchless implementation** (Completed Dec 2025)
-* [x] **Packed Headers** (Completed Dec 2025)
-* [ ] **Thread-Local Caching (Per-Core Slabs)** for lock-free concurrency.
-* [ ] **Huge Page Support (2MB pages)** to reduce TLB misses.
-* [ ] **NUMA Awareness** for multi-socket servers.
-```
+- [x] **Branchless implementation** (Completed Dec 2025)
+- [x] **Packed Headers** (Completed Dec 2025)
+- [ ] **Thread-Local Caching (Per-Core Slabs)** for lock-free concurrency.
+- [ ] **Huge Page Support (2MB pages)** to reduce TLB misses.
+- [ ] **NUMA Awareness** for multi-socket servers.
