@@ -4,12 +4,18 @@
 #include <stdint.h>
 #include <sys/mman.h>
 #include <stdexcept>
+#include <vector>
+
 #include "slab.hpp"
 
 namespace
 {
-    constexpr size_t PAGE_COUNT = 1;
-    constexpr size_t PAGE_SIZE = 4096; // BYTES
+    // constexpr uint32_t PAGE_COUNT = 1; this will be one only
+    static constexpr uint32_t MIN_OBJECTS_PER_SLAB = 8;
+    static constexpr uint32_t MIN_OBJECT_SIZE = 16;
+
+    static constexpr uint32_t DEFAULT_PAGE_ALLOCATION_COUNT = 64;
+    static const uint32_t CACHE_LINE_SIZE = sysconf(_SC_LEVEL1_DCACHE_LINESIZE) > 0 ? sysconf(_SC_LEVEL1_DCACHE_LINESIZE) : 64;
 
     template <typename T>
     constexpr T align_up(T n, size_t align = alignof(std::max_align_t)) noexcept
@@ -23,247 +29,197 @@ class cache_t // for now jsut keep one page per slab
     using ctor = void (*)(void *);
     using dtor = void (*)(void *);
 
-    const char *name;
+    uint32_t obj_size, obj_cnt; // cnt in one slab
 
-    size_t obj_size, obj_cnt;                         // cnt in one slab
-    slab_t *slabs_full, *slabs_partial, *slabs_empty; // these are list heads
+    slab_t list_full;
+    slab_t list_partial;
+    slab_t list_empty; // using sentinels now as dummy
 
     ctor cons;
     dtor dest;
 
+    uint64_t PAGE_SIZE = 4096; // BYTES
     //
-    unsigned int color, color_offset, color_next; // for cache coloring
+    uint32_t color, color_offset, color_next; // for cache coloring
 
     // slab movement helpers
-    void move_slab_partial_to_full(slab_t *slab)
+    void move_to_partial(slab_t *slab)
     {
-        assert(slab->active_obj_cnt == obj_cnt);
-        //
-
-        auto res = slab->disconnect();
-        if (slab == slabs_partial)
-            slabs_partial = res;
-
-        if (slabs_full == nullptr)
-            slabs_full = slab;
-        else
-            slab->connect_before(slabs_full);
-    }
-    void move_slab_partial_to_empty(slab_t *slab)
-    {
-
-        assert(slab->active_obj_cnt == 0);
-
-        auto res = slab->disconnect();
-        if (slab == slabs_partial)
-            slabs_partial = res;
-
-        if (slabs_empty == nullptr)
-            slabs_empty = slab;
-        else
-            slab->connect_before(slabs_empty);
-    }
-    void move_slab_empty_to_partial(slab_t *slab)
-    {
-
-        assert(slab->active_obj_cnt != 0);
-
-        auto res = slab->disconnect();
-        if (slab == slabs_empty)
-            slabs_empty = res;
-
-        if (slabs_partial == nullptr)
-            slabs_partial = slab;
-        else
-            slab->connect_before(slabs_partial);
-
-        if (slab->active_obj_cnt == obj_cnt)
-            move_slab_partial_to_full(slab);
-    }
-    void move_slab_full_to_partial(slab_t *slab)
-    {
-        assert(slab->active_obj_cnt != obj_cnt);
-
-        auto res = slab->disconnect();
-        if (slab == slabs_full)
-            slabs_full = res;
-
-        if (slabs_partial == nullptr)
-            slabs_partial = slab;
-        else
-            slab->connect_before(slabs_partial);
-
-        if (slab->active_obj_cnt == 0)
-            move_slab_partial_to_empty(slab);
+        slab->unlink();
+        slab->link_after(&list_partial);
     }
 
+    void move_to_full(slab_t *slab)
+    {
+        slab->unlink();
+        slab->link_after(&list_full);
+    }
+
+    void move_to_empty(slab_t *slab)
+    {
+        slab->unlink();
+        slab->link_after(&list_empty);
+    }
     // get helpers
-    unsigned int *get_freelist_offset(const void *slab) const noexcept
-    {
-        return (unsigned int *)align_up((uintptr_t)slab + sizeof(slab_t));
-    }
-    void *get_obj_offset(const void *slab) const noexcept
-    {
-        auto p = get_freelist_offset(slab);
-        return (void *)align_up((uintptr_t)p + sizeof(unsigned int) * obj_cnt);
-    }
-    void *get_obj_at_index(char *obj_start, size_t index) const noexcept
-    {
-        return obj_start + index * obj_size;
-    }
-    unsigned int get_and_modify_next_free(slab_t *cur_slab) const
-    {
-        unsigned int nextfree = cur_slab->free;
-        unsigned int *freelist_offset = get_freelist_offset(cur_slab);
-        cur_slab->free = *(freelist_offset + nextfree);
-        return nextfree;
-    }
-    void *get_partial_obj()
-    {
-        if (slabs_partial == nullptr)
-            return nullptr;
 
-        auto nextfree = get_and_modify_next_free(slabs_partial);
-
-        auto p = slabs_partial;
-
-        if (++slabs_partial->active_obj_cnt == obj_cnt)
-            move_slab_partial_to_full(slabs_partial);
-
-        return get_obj_at_index((char *)p->mem, nextfree);
-    }
-    void *get_free_obj()
-    {
-        if (slabs_empty == nullptr)
-            return nullptr;
-
-        auto p = slabs_empty;
-        auto nextfree = get_and_modify_next_free(slabs_empty);
-
-        ++slabs_empty->active_obj_cnt;
-        move_slab_empty_to_partial(slabs_empty);
-
-        return get_obj_at_index((char *)p->mem, nextfree);
-    }
-
-    void *add_cache_coloring(void *obj_start)  noexcept
+    uint8_t *add_cache_coloring(uint8_t *obj_start) noexcept
     {
         if (color < 2)
             return obj_start;
 
         uintptr_t new_obj_start = (uintptr_t)obj_start + color_next * color_offset;
         color_next = (color_next + 1) % color;
-        return (void *)new_obj_start;
+        return (uint8_t *)new_obj_start;
+    }
+
+    void initiliaze_slab(void *mem, bool is_aligned, bool is_front)
+    {
+        slab_t *slab_obj = new (mem) slab_t(is_aligned, is_front);
+
+        uint8_t *memptr = reinterpret_cast<uint8_t *>(mem);
+        uint8_t *freelist_start = memptr + sizeof(slab_t);
+
+        for (uint8_t i = 0; i < obj_cnt; i++)
+        {
+            freelist_start[i] = i + 1;
+        }
+
+        uint8_t obj_offset = align_up(sizeof(slab_t) + obj_cnt, CACHE_LINE_SIZE);
+        slab_obj->mem = add_cache_coloring(memptr + obj_offset);
+
+        if (dest == nullptr && cons != nullptr)
+            for (size_t i = 0; i < obj_cnt; i++)
+                cons(slab_obj->mem + i * obj_size);
+
+        slab_obj->link_after(&list_empty);
     }
 
     void allocate_free_slab()
     {
         //
-        void *mem = mmap(nullptr, PAGE_COUNT * PAGE_SIZE,
-                         PROT_READ | PROT_WRITE,
-                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        void *mem;
+        bool got_aligned = true;
 
-        assert(mem != MAP_FAILED);
+        void *pos_mem = mmap(nullptr, PAGE_SIZE * DEFAULT_PAGE_ALLOCATION_COUNT, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        assert(pos_mem != MAP_FAILED);
 
-        slab_t *slab_obj = new (mem) slab_t{};
+        uintptr_t mem_location = reinterpret_cast<uintptr_t>(pos_mem);
+        uintptr_t og_mem_location = mem_location;
+        if (mem_location % PAGE_SIZE)
+        {
+            got_aligned = false;
+            mem_location = (mem_location + PAGE_SIZE - 1) & (~(PAGE_SIZE - 1));
 
-        auto p = get_freelist_offset(slab_obj);
-        new (p) free_list(p, obj_cnt); // initialisign free list
+            uintptr_t *metadata_space = (uintptr_t *)mem_location;
+            metadata_space[-1] = og_mem_location;
+        }
 
-        void *obj_mem = get_obj_offset(slab_obj);
+        mem = reinterpret_cast<void *>(mem_location);
 
-        slab_obj->mem = add_cache_coloring(obj_mem);
-
-        if (dest == nullptr && cons != nullptr) // if dest != nullptr, cons/dest are called when giving/getting objects
-            for (size_t i = 0; i < obj_cnt; i++)
-                cons(get_obj_at_index((char *)slab_obj->mem, i));
-
-        // put slab in empty list
-        if (slabs_empty == nullptr)
-            slabs_empty = slab_obj;
-        else
-            slab_obj->connect_after(slabs_empty);
+        for (int i = 0; i < DEFAULT_PAGE_ALLOCATION_COUNT; i++)
+            initiliaze_slab((uint8_t *)mem + PAGE_SIZE * i, got_aligned, i == 0);
     }
 
 public:
-    cache_t(const char *name_, size_t obj_size_, ctor ctr = nullptr, dtor dtr = nullptr) : name(name_), obj_size(align_up(obj_size_)),
-                                                                                           slabs_full(nullptr), slabs_partial(nullptr), slabs_empty(nullptr),
-                                                                                           cons(ctr), dest(dtr)
+    cache_t(uint32_t obj_size_, ctor ctr = nullptr, dtor dtr = nullptr) : obj_size(obj_size_),
+                                                                          cons(ctr), dest(dtr)
     {
 
         assert(obj_size > 0);
 
-        obj_cnt = (PAGE_SIZE * PAGE_COUNT - sizeof(slab_t)) / (obj_size + sizeof(unsigned int));
+        obj_size = std::max(obj_size, MIN_OBJECT_SIZE);
+        obj_size = (1 << (32 - __builtin_clz(obj_size - 1)));
+
+        uint32_t metadata_min_requirement = CACHE_LINE_SIZE;
+        uint32_t required = obj_size * MIN_OBJECTS_PER_SLAB + metadata_min_requirement;
+
+        PAGE_SIZE = std::max(4096u, required);
+        PAGE_SIZE = (1 << (32 - __builtin_clz(PAGE_SIZE - 1)));
+
+        obj_cnt = PAGE_SIZE / obj_size; // assuming
 
         size_t size_left = 0;
 
         while (true)
         {
-            uintptr_t freelist_size = obj_cnt * sizeof(unsigned int);
-            uintptr_t obj_start = align_up(align_up(sizeof(slab_t)) + freelist_size);
-            uintptr_t total_used = obj_start + obj_cnt * obj_size;
+            uint32_t metadata_req = (sizeof(slab_t) + obj_cnt + CACHE_LINE_SIZE - 1) & (~(CACHE_LINE_SIZE - 1)); // byte aligned for cache line
 
-            if (total_used <= PAGE_SIZE * PAGE_COUNT)
+            uint32_t total_used = metadata_req + obj_cnt * obj_size;
+
+            if (total_used <= PAGE_SIZE)
             {
-                size_left = PAGE_SIZE * PAGE_COUNT - total_used;
+                size_left = PAGE_SIZE - total_used;
                 break;
             }
             obj_cnt--;
         }
 
-        assert(obj_cnt > 0);
-
         // set up coloring
 
-        size_t cache_line_size = 64;
-        if (auto p = sysconf(_SC_LEVEL1_DCACHE_LINESIZE); p > 0)
-            cache_line_size = p;
-
-        color = (size_left / cache_line_size) + 1;
+        color = (size_left / CACHE_LINE_SIZE) + 1;
         color_next = 0;
-        color_offset = cache_line_size;
+        color_offset = CACHE_LINE_SIZE;
     }
 
     void *cache_alloc()
     {
-        void *toret = nullptr;
-        if (toret = get_partial_obj(); toret != nullptr)
-            ;
-        else if (toret = get_free_obj(); toret != nullptr)
-            ;
-        else
-            allocate_free_slab(), toret = get_free_obj();
+        slab_t *slab = list_partial.next;
 
-        if (dest != nullptr && cons != nullptr) // if no dest if would have been constructed at slab allocaiton itself
-            cons(toret);
+        if (__builtin_expect(slab == &list_partial, 0))
+        {
+            slab = list_empty.next;
+            if (slab == &list_empty)
+            {
+                allocate_free_slab();
+                slab = list_empty.next;
+            }
+            move_to_partial(slab);
+        }
 
-        return toret;
+        uint8_t next_idx = slab->free;
+        uint8_t *freelist = (uint8_t *)slab + sizeof(slab_t); // size of slab_t
+
+        slab->free = freelist[next_idx];
+        slab->active_obj_cnt++;
+
+        if (slab->active_obj_cnt == obj_cnt)
+            move_to_full(slab);
+
+        void *obj = (uint8_t *)slab->mem + (next_idx * obj_size);
+
+        // __builtin_prefetch(obj, 1, 3);
+
+        if (cons)
+            cons(obj);
+        return obj;
     }
 
     void cache_free(void *obj)
     {
+
         if (dest)
             dest(obj);
 
-        // gettign addr
-        uintptr_t obj_add = (uintptr_t)obj;
-        slab_t *slab = (slab_t *)(obj_add & ~(PAGE_SIZE * PAGE_COUNT - 1)); // 🚨⚠️ this works for (apge * pagecount) alinged memory only [so rn only 1 page can come coz mmap give one page algined ]
+        uintptr_t obj_addr = (uintptr_t)obj;
+        slab_t *slab = (slab_t *)(obj_addr & ~(PAGE_SIZE - 1));
 
-        // resetting free list
-        unsigned int obj_ind = (obj_add - (uintptr_t)slab->mem) / obj_size;
-        unsigned int next_free = slab->free;
+        uint8_t obj_ind = (obj_addr - (uintptr_t)slab->mem) / obj_size;
 
-        unsigned int *freelist_offset = get_freelist_offset(slab);
-        freelist_offset[obj_ind] = next_free;
+        // Push to freelist
+        uint8_t *freelist = (uint8_t *)slab + sizeof(slab_t); // size of slab_t
+        freelist[obj_ind] = slab->free;
         slab->free = obj_ind;
 
-        // moving slab if need
-        if (slab->active_obj_cnt == obj_cnt) // means its in full list
-            slab->active_obj_cnt--, move_slab_full_to_partial(slab);
-        else if (slab->active_obj_cnt - 1 == 0) // means partial to empty
-            slab->active_obj_cnt--, move_slab_partial_to_empty(slab);
-        else
-            slab->active_obj_cnt--;
+        slab->active_obj_cnt--;
+
+        if (slab->active_obj_cnt == obj_cnt - 1)
+        {
+            move_to_partial(slab);
+        }
+        else if (slab->active_obj_cnt == 0)
+        {
+            move_to_empty(slab);
+        }
     }
 
     //
@@ -274,14 +230,34 @@ public:
 
     ~cache_t()
     {
-        for (auto cur_list : {slabs_full, slabs_partial, slabs_empty})
+        std::vector<std::pair<void *, uint32_t>> to_free;
+
+        auto collect_pages = [&](slab_t &sentinel)
         {
-            while (cur_list)
+            slab_t *cur = sentinel.next;
+            while (cur != &sentinel)
             {
-                void *p = cur_list;
-                cur_list = cur_list->next;
-                munmap(p, PAGE_COUNT * PAGE_SIZE);
+                if (cur->flags.is_mmap_front)
+                {
+                    if (cur->flags.perfectly_aligned)
+                        to_free.emplace_back(cur, PAGE_SIZE * DEFAULT_PAGE_ALLOCATION_COUNT);
+                    else
+                    {
+                        uintptr_t *metadata_space = (uintptr_t *)cur;
+                        void *raw_ptr = (void *)metadata_space[-1];
+
+                        to_free.emplace_back(raw_ptr, PAGE_SIZE * DEFAULT_PAGE_ALLOCATION_COUNT);
+                    }
+                }
+                cur = cur->next;
             }
-        }
+        };
+
+        collect_pages(list_full);
+        collect_pages(list_partial);
+        collect_pages(list_empty);
+
+        for (auto [i, j] : to_free)
+            munmap(i, j);
     }
 };

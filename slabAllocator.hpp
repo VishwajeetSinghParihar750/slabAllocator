@@ -3,6 +3,8 @@
 #include <stdlib.h>
 #include <unordered_map>
 #include "assert.h"
+#include <string>
+
 #include "cache.hpp"
 
 class slabAllocator
@@ -10,29 +12,46 @@ class slabAllocator
     using ctor = void (*)(void *);
     using dtor = void (*)(void *);
 
-    std::unordered_map<const char *, cache_t> caches;
+    std::unordered_map<std::string, cache_t *> caches;
 
 public:
-    void cache_create(const char *name, size_t obj_size, ctor ctr, dtor dtr)
+    ~slabAllocator()
     {
-        assert(!caches.contains(name));
-        caches.try_emplace(name, name, obj_size, ctr, dtr);
-    }
-    void cache_destroy(const char *name)
-    {
-        caches.erase(name);
+        for (auto &pair : caches)
+            delete pair.second;
     }
 
-    void *cache_alloc(const char *name)
+    cache_t *cache_create(const std::string &name, size_t obj_size, ctor ctr, dtor dtr)
     {
-        auto it = caches.find(name);
-        assert(it != caches.end());
-        return it->second.cache_alloc();
+        // assert(!caches.contains(name)); // apps responsiblity otherwise UB
+
+        cache_t *cur_cache = new cache_t(obj_size, ctr, dtr);
+
+        auto ret = caches.try_emplace(name, cur_cache);
+        if (ret.second)
+            return cur_cache;
+
+        delete cur_cache;
+        return nullptr;
     }
-    void cache_free(const char *name, void *obj)
+
+    void cache_destroy(const std::string &name)
     {
         auto it = caches.find(name);
-        assert(it != caches.end());
-        it->second.cache_free(obj);
+
+        // assert(it != caches.end()); // apps responsibilty otherwise UB
+
+        delete it->second;
+        caches.erase(it);
+    }
+
+    void *cache_alloc(cache_t *cur_cache) // callers resonsiblity to send only the thing that was returned by cache_create, otherwise UB
+    {
+        return cur_cache->cache_alloc();
+    }
+
+    void cache_free(cache_t *cur_cache, void *obj) // callers resonsiblity to send only the thing that was returned by cache_alloc, otherwise UB
+    {
+        cur_cache->cache_free(obj);
     }
 };

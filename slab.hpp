@@ -3,66 +3,58 @@
 
 class cache_t;
 
-struct free_list
+#pragma pack(push, 1)
+class slab_t // 32 bytes
 {
-    free_list(unsigned int *arr, size_t n) noexcept
+    //
+    slab_t *prev, *next; // 8, 8
+    uint8_t *mem;        // 8
+    //
+    uint8_t active_obj_cnt; // 1
+    uint8_t free;           // first free // 1
+
+    struct
     {
-        for (unsigned int i = 0; i < n; i++)
-        {
-            arr[i] = i + 1; // last element may have BUFCTL_END
-        }
-    }
-};
+        uint8_t perfectly_aligned : 1; // true or false, used for unmap checks // 1
+        uint8_t is_mmap_front : 1;     // true or false, this is front of mmap allocation
+        uint8_t unused : 6;            // 6 bits
+    } flags;
 
-class slab_t
-{
-    //
-    void *mem;
-    unsigned int active_obj_cnt;
-    unsigned int free; // first free
 
-    slab_t *prev, *next;
-    //
+
+    // FREE LIST IS KEPT JUST HERE [ 0, 1, 2, 3 ... ]
     friend class cache_t;
 
 public:
-    slab_t() : mem(nullptr), active_obj_cnt(0), free(0), prev(nullptr), next(nullptr) {}
-
-    slab_t *connect_before(slab_t *node) noexcept // return cur node
+    slab_t() : prev(this), next(this), mem(nullptr), active_obj_cnt(0), free(0)
     {
-        if (node == nullptr)
-            return this;
-
-        next = node;
-        prev = node->prev;
-
-        if (node->prev != nullptr)
-            node->prev->next = this;
-        node->prev = this;
-
-        return this;
+        flags = {0, 0, 0};
     }
-    slab_t *connect_after(slab_t *node) noexcept // return cur node
+
+    slab_t(bool is_aligned, bool is_front) : mem(nullptr), active_obj_cnt(0), free(0), prev(nullptr), next(nullptr)
     {
-        assert(node != nullptr);
-
-        prev = node;
-        next = node->next;
-
-        if (node->next != nullptr)
-            node->next->prev = this;
-        node->next = this;
-
-        return this;
+        flags.is_mmap_front = is_front;
+        flags.perfectly_aligned = is_aligned;
+        flags.unused = 0;
     }
-    slab_t *disconnect()  noexcept // returns next is list
-    {
-        if (prev != nullptr)
-            prev->next = next;
-        if (next != nullptr)
-            next->prev = prev;
 
-        prev = nullptr, next = nullptr;
-        return next;
+    inline void unlink() noexcept
+    {
+        next->prev = prev;
+        prev->next = next;
+    }
+
+    inline void link_after(slab_t *sentinel) noexcept
+    {
+        this->next = sentinel->next;
+        this->prev = sentinel;
+        sentinel->next->prev = this;
+        sentinel->next = this;
+    }
+
+    inline bool is_empty_list() const
+    {
+        return next == this;
     }
 };
+#pragma pack(pop)
