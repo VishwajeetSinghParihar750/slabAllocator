@@ -1,4 +1,4 @@
-# ⚡ High-Performance C++ Slab Allocator 
+# ⚡ High-Performance C++ Slab Allocator
 
 A production-ready, cache-friendly **Slab Allocator** designed for high-frequency trading (HFT), game networking (RUDP), and real-time systems. It achieves **~50 Million allocations/sec** on a single core and outperforms `malloc` by **over 5x** in complex, mixed workloads.
 
@@ -77,4 +77,27 @@ allocator.cache_free(packet_cache, ptr);
 
 // 5. Cleanup
 // Destructor automatically unmaps all memory
+```
+
+## 📦 Build & Test
+
+The benchmarks are located in the `benchmark/` folder. You can compile and run any benchmark file (e.g., `benchmark2.cpp`) using a single command.
+
+```bash
+# 1. Enter the benchmark directory
+cd benchmark
+
+# 2. Compile and run
+g++ -std=c++20 -O3 benchmark3.cpp -o slab_allocator && ./slab_allocator
+
+### Credits
+* **Benchmarks created by:** Gemini
+
+## 🔮 Future Roadmap
+
+* [x] **Branchless implementation** (Completed Dec 2025)
+* [x] **Packed Headers** (Completed Dec 2025)
+* [ ] **Thread-Local Caching (Per-Core Slabs)** for lock-free concurrency.
+* [ ] **Huge Page Support (2MB pages)** to reduce TLB misses.
+* [ ] **NUMA Awareness** for multi-socket servers.
 ```
