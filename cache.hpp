@@ -116,7 +116,7 @@ class cache_t // for now jsut keep one page per slab
 
         mem = reinterpret_cast<void *>(mem_location);
 
-        for (int i = 0; i < DEFAULT_PAGE_ALLOCATION_COUNT; i++)
+        for (int i = 0; i < DEFAULT_PAGE_ALLOCATION_COUNT - (!got_aligned); i++)
             initiliaze_slab((uint8_t *)mem + PAGE_SIZE * i, got_aligned, i == 0);
     }
 
