@@ -1,4 +1,4 @@
-#include "slabAllocator.hpp"
+#include "../slabAllocator.hpp"
 #include "sequence_buffer.hpp"
 #include <iostream>
 #include <vector>

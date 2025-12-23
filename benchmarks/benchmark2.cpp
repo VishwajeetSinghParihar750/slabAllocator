@@ -1,4 +1,4 @@
-#include "slabAllocator.hpp"
+#include "../slabAllocator.hpp"
 #include <chrono>
 #include <vector>
 #include <iomanip>
