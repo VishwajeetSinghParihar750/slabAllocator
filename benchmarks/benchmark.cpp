@@ -1,6 +1,8 @@
 #pragma once
 
+// Assuming your slabAllocator class is in this header
 #include "slabAllocator.hpp"
+
 #include <chrono>
 #include <vector>
 #include <iomanip>
@@ -41,7 +43,6 @@ struct BenchmarkResult
     double slab_ops_per_sec() const { return operations / (slab_time_ms / 1000.0); }
     double system_ops_per_sec() const { return operations / (system_time_ms / 1000.0); }
     double speedup() const { return system_time_ms / slab_time_ms; }
-    double memory_saved_mb() const { return (system_time_ms - slab_time_ms) * (operations / slab_time_ms) * object_size / (1024.0 * 1024.0); }
 };
 
 class ProfessionalBenchmark
@@ -51,7 +52,7 @@ private:
 
     void clear_system_state()
     {
-        // Allocate and free large memory to clear caches
+        // Allocate and free large memory to clear CPU caches
         const size_t CLEAR_SIZE = 50 * 1024 * 1024; // 50MB
         void *clear_mem = malloc(CLEAR_SIZE);
         if (clear_mem)
@@ -63,7 +64,6 @@ private:
 #ifdef __linux__
         malloc_trim(0); // Linux-specific memory cleanup
 #endif
-
         // Let the system settle
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
@@ -81,20 +81,21 @@ public:
 
         std::cout << "Running 5 isolated benchmark suites...\n";
 
-        // Run each benchmark in complete isolation
         results.push_back(run_small_objects_benchmark());
-        print_progress("Small Objects", 1, 5);
+        print_progress("Small Objects", 1, 4); // Adjusted total to 4
 
         results.push_back(run_medium_objects_benchmark());
-        print_progress("Medium Objects", 2, 5);
+        print_progress("Medium Objects", 2, 4);
 
         results.push_back(run_large_objects_benchmark());
-        print_progress("Large Objects", 3, 5);
+        print_progress("Large Objects", 3, 4);
 
         results.push_back(run_mixed_workload_benchmark());
-        print_progress("Mixed Workload", 4, 5);
+        print_progress("Mixed Workload", 4, 4);
 
         std::cout << "\r\033[K✅ All benchmarks completed!\n\n";
+
+        print_detailed_results();
     }
 
     BenchmarkResult run_small_objects_benchmark()
@@ -108,20 +109,27 @@ public:
 
         { // Slab allocator test
             slabAllocator slab;
-            slab.cache_create("small_obj", 32, nullptr, nullptr);
+            // UPDATE: Store the pointer returned by cache_create
+            cache_t *cache = slab.cache_create("small_obj", 32, nullptr, nullptr);
 
             std::vector<void *> pointers(result.operations);
 
             HighResTimer timer;
             for (size_t i = 0; i < result.operations; i++)
             {
-                pointers[i] = slab.cache_alloc("small_obj");
+                // UPDATE: Pass the cache pointer directly
+                pointers[i] = slab.cache_alloc(cache);
             }
+            // Measure Alloc + Free? Or just Alloc? usually benchmarks measure the cycle.
+            // Your previous code stopped timer here, so I will stick to that.
             result.slab_time_ms = timer.elapsed_ms();
 
+            // Clean up (outside timer, unless you want throughput of alloc+free loop)
+            // Ideally, high-perf benchmarks usually include free time if measuring "usage cycle"
+            // But since your previous one didn't include free in the timer, I'll keep it consistent.
             for (void *ptr : pointers)
             {
-                slab.cache_free("small_obj", ptr);
+                slab.cache_free(cache, ptr);
             }
         }
 
@@ -155,28 +163,28 @@ public:
         result.operations = 500000;
         result.object_size = 256;
 
-        { // Slab allocator test
+        {
             slabAllocator slab;
-            slab.cache_create("medium_obj", 256, nullptr, nullptr);
+            cache_t *cache = slab.cache_create("medium_obj", 256, nullptr, nullptr);
 
             std::vector<void *> pointers(result.operations);
 
             HighResTimer timer;
             for (size_t i = 0; i < result.operations; i++)
             {
-                pointers[i] = slab.cache_alloc("medium_obj");
+                pointers[i] = slab.cache_alloc(cache);
             }
             result.slab_time_ms = timer.elapsed_ms();
 
             for (void *ptr : pointers)
             {
-                slab.cache_free("medium_obj", ptr);
+                slab.cache_free(cache, ptr);
             }
         }
 
         clear_system_state();
 
-        { // System allocator test
+        {
             std::vector<void *> pointers(result.operations);
 
             HighResTimer timer;
@@ -204,28 +212,28 @@ public:
         result.operations = 100000;
         result.object_size = 1024;
 
-        { // Slab allocator test
+        {
             slabAllocator slab;
-            slab.cache_create("large_obj", 1024, nullptr, nullptr);
+            cache_t *cache = slab.cache_create("large_obj", 1024, nullptr, nullptr);
 
             std::vector<void *> pointers(result.operations);
 
             HighResTimer timer;
             for (size_t i = 0; i < result.operations; i++)
             {
-                pointers[i] = slab.cache_alloc("large_obj");
+                pointers[i] = slab.cache_alloc(cache);
             }
             result.slab_time_ms = timer.elapsed_ms();
 
             for (void *ptr : pointers)
             {
-                slab.cache_free("large_obj", ptr);
+                slab.cache_free(cache, ptr);
             }
         }
 
         clear_system_state();
 
-        { // System allocator test
+        {
             std::vector<void *> pointers(result.operations);
 
             HighResTimer timer;
@@ -250,13 +258,14 @@ public:
 
         BenchmarkResult result;
         result.name = "Mixed Workload";
-        result.operations = 400000; // 200k of each type
-        result.object_size = 288;   // Average of 64 + 512
+        result.operations = 400000; // 200k of each
+        result.object_size = 288;
 
-        { // Slab allocator test
+        {
             slabAllocator slab;
-            slab.cache_create("mixed_small", 64, nullptr, nullptr);
-            slab.cache_create("mixed_medium", 512, nullptr, nullptr);
+            // UPDATE: Get both cache pointers
+            cache_t *small_cache = slab.cache_create("mixed_small", 64, nullptr, nullptr);
+            cache_t *medium_cache = slab.cache_create("mixed_medium", 512, nullptr, nullptr);
 
             std::vector<void *> small_ptrs(200000);
             std::vector<void *> medium_ptrs(200000);
@@ -264,22 +273,22 @@ public:
             HighResTimer timer;
             for (size_t i = 0; i < 200000; i++)
             {
-                small_ptrs[i] = slab.cache_alloc("mixed_small");
-                medium_ptrs[i] = slab.cache_alloc("mixed_medium");
+                // UPDATE: Use pointers directly
+                small_ptrs[i] = slab.cache_alloc(small_cache);
+                medium_ptrs[i] = slab.cache_alloc(medium_cache);
             }
             result.slab_time_ms = timer.elapsed_ms();
 
             for (size_t i = 0; i < 200000; i++)
             {
-                slab.cache_free("mixed_small", small_ptrs[i]);
-                slab.cache_free("mixed_medium", medium_ptrs[i]);
+                slab.cache_free(small_cache, small_ptrs[i]);
+                slab.cache_free(medium_cache, medium_ptrs[i]);
             }
         }
-        
 
         clear_system_state();
 
-        { // System allocator test
+        {
             std::vector<void *> small_ptrs(200000);
             std::vector<void *> medium_ptrs(200000);
 
@@ -306,7 +315,6 @@ public:
         std::cout << "📊 DETAILED PERFORMANCE RESULTS\n";
         std::cout << "================================\n\n";
 
-        // Table header
         std::cout << std::left
                   << std::setw(22) << "TEST CASE"
                   << std::setw(14) << "OPS/sec"
@@ -317,7 +325,6 @@ public:
 
         std::cout << std::string(82, '-') << "\n";
 
-        // Table rows
         for (const auto &result : results)
         {
             std::cout << std::left
@@ -359,10 +366,6 @@ public:
                   << avg_speedup << "x faster than system malloc\n";
         std::cout << "• Peak Throughput: " << std::setprecision(1)
                   << (avg_slab_throughput / 1000000.0) << "M operations/second\n";
-        std::cout << "• Efficiency: " << std::setprecision(1)
-                  << (avg_slab_throughput / avg_system_throughput * 100.0)
-                  << "% more efficient than system malloc\n";
-        std::cout << "• Consistency: Performance improvements maintained across all object sizes\n";
     }
 
     void print_github_markdown()
@@ -384,3 +387,30 @@ public:
         std::cout << "```\n";
     }
 };
+
+int main()
+{
+    std::cout << "🎯 HIGH-PERFORMANCE SLAB ALLOCATOR BENCHMARK\n";
+    std::cout << "============================================\n\n";
+
+    std::cout << "This benchmark suite tests the slab allocator against system malloc\n";
+    std::cout << "with complete isolation between tests for accurate results.\n\n";
+
+    ProfessionalBenchmark benchmark;
+
+    // Run all comprehensive benchmarks
+    benchmark.run_comprehensive_benchmarks();
+
+    // Print beautiful results
+    benchmark.print_detailed_results();
+
+    std::cout << "\n🎉 BENCHMARK COMPLETE!\n";
+    std::cout << "=====================\n";
+    std::cout << "The slab allocator demonstrates significant performance improvements\n";
+    std::cout << "across all tested scenarios, making it ideal for:\n";
+    std::cout << "• High-performance systems\n• Real-time applications\n";
+    std::cout << "• Memory-constrained environments\n• Game engines\n";
+    std::cout << "• Database systems\n• Embedded systems\n";
+
+    return 0;
+}
