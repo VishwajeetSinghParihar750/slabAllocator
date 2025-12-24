@@ -100,6 +100,6 @@ g++ -std=c++20 -O3 benchmark3.cpp -o slab_allocator && ./slab_allocator
 
 - [x] **Branchless implementation** (Completed Dec 2025)
 - [x] **Packed Headers** (Completed Dec 2025)
-- [ ] **Thread-Local Caching (Per-Core Slabs)** for lock-free concurrency.
+- [x] **Thread-Local Caching (Per-Core Slabs)** (Implemented in `thread-safe` branch)
 - [ ] **Huge Page Support (2MB pages)** to reduce TLB misses.
 - [ ] **NUMA Awareness** for multi-socket servers.
