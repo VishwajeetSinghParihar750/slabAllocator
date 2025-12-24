@@ -5,6 +5,7 @@
 #include <sys/mman.h>
 #include <stdexcept>
 #include <vector>
+#include <cassert>
 
 #include "slab.hpp"
 
