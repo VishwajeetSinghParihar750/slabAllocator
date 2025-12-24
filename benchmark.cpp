@@ -5,32 +5,28 @@
 #include <atomic>
 #include <iomanip>
 #include <random>
-#include "slabAllocator.hpp"
+#include "slab_allocator.hpp" // Updated header name
 
 using namespace std::chrono;
 
 // --- Configuration ---
 constexpr int NUM_THREADS = 2;
-constexpr int ALLOCS_PER_THREAD = 10'000'000; // 10 Million per thread
-constexpr size_t OBJ_SIZE = 64;               // 64-byte objects
+constexpr int ALLOCS_PER_THREAD = 10'000'000;
+constexpr size_t OBJ_SIZE = 64;
 
 // --- Malloc Benchmark ---
 void benchmark_malloc(std::atomic<long long> &total_us)
 {
-    // We use a raw array or vector to hold pointers.
-    // To minimize vector resizing noise, we reserve.
     std::vector<void *> ptrs;
     ptrs.reserve(ALLOCS_PER_THREAD);
 
     auto start = high_resolution_clock::now();
 
-    // 1. Burst Allocation
     for (int i = 0; i < ALLOCS_PER_THREAD; ++i)
     {
         ptrs.push_back(std::malloc(OBJ_SIZE));
     }
 
-    // 2. Burst Deallocation (LIFO order helps cache, but we test raw speed)
     for (int i = ALLOCS_PER_THREAD - 1; i >= 0; --i)
     {
         std::free(ptrs[i]);
@@ -41,26 +37,26 @@ void benchmark_malloc(std::atomic<long long> &total_us)
 }
 
 // --- Slab Benchmark ---
-void benchmark_slab(slabAllocator &allocator, cache_t *cache, std::atomic<long long> &total_us)
+void benchmark_slab(std::atomic<long long> &total_us)
 {
     std::vector<void *> ptrs;
     ptrs.reserve(ALLOCS_PER_THREAD);
 
+    // Define the specific slab we are testing
+    using bench_slab = slab_memory<OBJ_SIZE, "BENCH_CACHE">;
+
     auto start = high_resolution_clock::now();
 
-    // 1. Burst Allocation
-    // This tests the "Active Slab -> Local Partial -> Local Empty -> Global" chain
+    // 1. Burst Allocation using the new static API
     for (int i = 0; i < ALLOCS_PER_THREAD; ++i)
     {
-        ptrs.push_back(allocator.thread_safe_cache_alloc(cache));
+        ptrs.push_back(bench_slab::alloc());
     }
 
-    // 2. Burst Deallocation
-    // This tests the "Active Slab -> Local Partial -> Local Empty" transitions
-    // and the "Hoarding Control" (return to global if too many empty)
+    // 2. Burst Deallocation using the new static API
     for (int i = ALLOCS_PER_THREAD - 1; i >= 0; --i)
     {
-        allocator.thread_safe_cache_free(cache, ptrs[i]);
+        bench_slab::free(ptrs[i]);
     }
 
     auto end = high_resolution_clock::now();
@@ -106,13 +102,10 @@ int main()
     // --- SLAB ALLOCATOR TEST ---
     {
         std::cout << "Running SLAB Benchmark...     " << std::flush;
-        slabAllocator allocator;
-        // Threads share the cache handle, but utilize their own ThreadContext internally
-        cache_t *cache = allocator.cache_create("bench_cache", OBJ_SIZE);
 
-        // Forced Warmup: Ensure any static/global initialization is done
-        void *warm = allocator.thread_safe_cache_alloc(cache);
-        allocator.thread_safe_cache_free(cache, warm);
+        // Forced Warmup: The first call to get_cache() initializes the static instance
+        void *warm = slab_memory<OBJ_SIZE, "BENCH_CACHE">::alloc();
+        slab_memory<OBJ_SIZE, "BENCH_CACHE">::free(warm);
 
         std::atomic<long long> total_us{0};
         std::vector<std::thread> threads;
@@ -121,7 +114,8 @@ int main()
 
         for (int i = 0; i < NUM_THREADS; ++i)
         {
-            threads.emplace_back(benchmark_slab, std::ref(allocator), cache, std::ref(total_us));
+            // Note: No need to pass an 'allocator' object anymore
+            threads.emplace_back(benchmark_slab, std::ref(total_us));
         }
         for (auto &t : threads)
             t.join();
