@@ -76,4 +76,7 @@ void process() {
 
 Currently, the allocator is tuned for **Maximum Throughput**. It holds onto allocated pages to prevent the expensive cost of `munmap` and `mmap` cycles during traffic bursts. This results in high stable memory usage (RSS) but guarantees consistent low-latency performance during extended runtimes.
 
+### Credits 
+
+Benchmarks and comments added by Gemini 
 
