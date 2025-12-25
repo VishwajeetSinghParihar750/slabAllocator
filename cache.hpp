@@ -21,7 +21,7 @@ namespace
     // If Slab is 256KB, we grab 8 slabs.
     static constexpr size_t TARGET_CHUNK_SIZE = 2 * 1024 * 1024;
     static const uint32_t CACHE_LINE_SIZE = sysconf(_SC_LEVEL1_DCACHE_LINESIZE) > 0 ? sysconf(_SC_LEVEL1_DCACHE_LINESIZE) : 64;
-    static constexpr uint32_t MAX_LOCAL_EMPTY_SLABS = 16;
+    static constexpr uint32_t MAX_LOCAL_EMPTY_SLABS = 32;
 
     template <typename T>
     constexpr T align_up(T n, size_t align = alignof(std::max_align_t)) noexcept
@@ -37,12 +37,10 @@ struct thread_context
     slab_t list_full;
     slab_t list_empty;
     uint32_t empty_slab_count = 0;
+    uint32_t scavenge_cooldown = 0;
 
     thread_context()
     {
-        list_partial.next = list_partial.prev = &list_partial;
-        list_full.next = list_full.prev = &list_full;
-        list_empty.next = list_empty.prev = &list_empty;
     }
 };
 
@@ -101,13 +99,12 @@ public:
         if (__builtin_expect(my_ctx == nullptr, 0))
             init_thread();
 
-        // PHASE 1: Active
-        slab_t *s = my_ctx->active;
+        slab_t *s = nullptr;
+
+        s = my_ctx->active;
         if (s)
         {
             if (s->local_head)
-                return pop_local(s);
-            if (reclaim_remote(s))
                 return pop_local(s);
 
             s->unlink();
@@ -115,22 +112,6 @@ public:
             my_ctx->active = nullptr;
         }
 
-        // PHASE 2: Refill
-        // Try Partial
-        while (!my_ctx->list_partial.is_empty_list())
-        {
-            s = my_ctx->list_partial.next;
-            if (s->local_head || reclaim_remote(s))
-            {
-                s->unlink();
-                my_ctx->active = s;
-                return pop_local(s);
-            }
-            s->unlink();
-            s->link_after(&my_ctx->list_full);
-        }
-
-        // Try Empty
         if (!my_ctx->list_empty.is_empty_list())
         {
             s = my_ctx->list_empty.next;
@@ -140,7 +121,54 @@ public:
             return pop_local(s);
         }
 
-        // Global
+        while (!my_ctx->list_partial.is_empty_list())
+        {
+            s = my_ctx->list_partial.next;
+
+            if (s->local_head || reclaim_remote(s))
+            {
+                s->unlink();
+                my_ctx->active = s;
+                return pop_local(s);
+            }
+
+            // If it somehow became full/empty, move it
+            s->link_after(&my_ctx->list_full);
+        }
+
+        if (my_ctx->scavenge_cooldown > 0)
+        {
+            my_ctx->scavenge_cooldown--;
+        }
+        else if (!my_ctx->list_full.is_empty_list())
+        {
+            int attempts = 64;
+            slab_t *curr = my_ctx->list_full.prev;
+            bool found = false;
+
+            while (attempts-- > 0 && curr != &my_ctx->list_full)
+            {
+                slab_t *prev_node = curr->prev; // Save prev before potentially modifying
+
+                if (curr->atomic_head.load(std::memory_order_relaxed) != nullptr)
+                {
+                    if (reclaim_remote(curr))
+                    {
+                        curr->unlink();
+                        my_ctx->active = curr;
+
+                        my_ctx->scavenge_cooldown = 0;
+
+                        return pop_local(curr);
+                    }
+                }
+
+                curr = prev_node;
+            }
+
+            my_ctx->scavenge_cooldown = 64;
+        }
+
         s = fetch_global_slab();
         my_ctx->active = s;
         if (s->next != s)
@@ -243,25 +271,34 @@ private:
         return obj;
     }
 
-    bool reclaim_remote(slab_t *s)
+    uint32_t reclaim_remote(slab_t *s)
     {
+        void *peek = s->atomic_head.load(std::memory_order_relaxed);
+        if (peek == nullptr)
+            return 0;
+
         void *remote = s->atomic_head.exchange(nullptr, std::memory_order_acquire);
+
         if (!remote)
-            return false;
+            return 0;
 
         uint32_t count = 0;
         void *cur = remote;
         void *last = nullptr;
+
         while (cur)
         {
             count++;
             last = cur;
             cur = *((void **)cur);
         }
+
         *((void **)last) = s->local_head;
+
         s->local_head = remote;
         s->active_obj_cnt -= count;
-        return true;
+
+        return count;
     }
 
     slab_t *fetch_global_slab()
@@ -320,6 +357,14 @@ private:
         size_t alloc_size = PAGE_SIZE * pages_per_chunk;
         void *pos_mem = mmap(nullptr, alloc_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         assert(pos_mem != MAP_FAILED);
+
+        // static uint32_t total_alloc = 0;
+        // total_alloc += alloc_size;
+        // if (total_alloc > 1ull * 1024 * 1024 * 1024)
+        // {
+        //     std::cerr << "hard limit of 1gb crossed " << std::endl;
+        //     std::abort();
+        // }
 
         mapped_pages.emplace_back(pos_mem, alloc_size);
 
